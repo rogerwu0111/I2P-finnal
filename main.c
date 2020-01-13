@@ -34,7 +34,8 @@ enum {
 	SCENE_START = 2,
 	// [HACKATHON 3-7]
 	// TODO: Declare a new scene id.
-    SCENE_SETTINGS = 3
+    SCENE_SETTINGS = 3,
+    SCENE_GAME_OVER = 4
 };
 
 /* Input states */
@@ -50,6 +51,17 @@ bool *mouse_state;
 int mouse_x, mouse_y;
 // TODO: More variables to store input states such as joysticks, ...
 
+// some variable to store states
+//score
+#define MAX_DIGITS 7
+int counting;
+bool score_change;
+int digit_table[MAX_DIGITS];
+//enemies
+bool crash_into_enemy;
+// life
+#define MAX_LIFE 4
+int life;
 /* Variables for allegro basic routines. */
 
 ALLEGRO_DISPLAY* game_display;
@@ -65,6 +77,8 @@ ALLEGRO_FONT* font_pirulen_24;
 
 /* Menu Scene resources*/
 ALLEGRO_BITMAP* main_img_background;
+/* Game over Scene */
+ALLEGRO_BITMAP* img_game_over;
 // [HACKATHON 3-1]
 // TODO: Declare 2 variables for storing settings images.
 // Uncomment and fill in the code below.
@@ -84,6 +98,7 @@ ALLEGRO_SAMPLE_ID start_bgm_id;
 // TODO: Declare a variable to store your bullet's image.
 // Uncomment and fill in the code below.
 ALLEGRO_BITMAP* img_bullet;
+ALLEGRO_BITMAP* img_enemy_bullet;
 
 typedef struct {
 	// The center coordinate of the image.
@@ -104,12 +119,18 @@ void draw_movable_object(MovableObject obj);
 // You can try max 4 bullets here and see if you needed more.
 // Uncomment and fill in the code below.
 #define MAX_BULLET 4
+#define MAX_ENEMY_BULLET 2
 MovableObject plane;
 MovableObject enemies[MAX_ENEMY];
 // [HACKATHON 2-3]
 // TODO: Declare an array to store bullets with size of max bullet count.
 // Uncomment and fill in the code below.
 MovableObject bullets[MAX_BULLET];
+MovableObject enemy_bullets[MAX_ENEMY][MAX_ENEMY_BULLET];
+MovableObject score[MAX_DIGITS]; // score[i] represents 10^i
+MovableObject life_bar;
+ALLEGRO_BITMAP* img_digits[10];
+ALLEGRO_BITMAP* img_life_bar[MAX_LIFE+1];
 // [HACKATHON 2-4]
 // TODO: Set up bullet shooting cool-down variables.
 // 1) Declare your shooting cool-down time as constant. (0.2f will be nice)
@@ -117,7 +138,9 @@ MovableObject bullets[MAX_BULLET];
 // Uncomment and fill in the code below.
 const float MAX_COOLDOWN = 0.2;
 double last_shoot_timestamp = 0;
-
+const float MAX_ENEMY_REBUILD_COOLDOWN = 3;
+const float MAX_ENEMY_COOLDOWN = 0.5; // moving cool down
+double last_enemy_timestamp[MAX_ENEMY]; // the time that enemy been destroyed or moving
 /* Declare function prototypes. */
 
 // Initialize allegro5 library
@@ -299,6 +322,44 @@ void game_init(void) {
 	if (!img_bullet)
 		game_abort("failed to load image: image12.png");
 
+    img_enemy_bullet = al_load_bitmap("image20.png");
+    if (!img_enemy_bullet)
+        game_abort("failed to load image: image20.png");
+    // score image
+    img_digits[0] = al_load_bitmap("0.png");
+    img_digits[1] = al_load_bitmap("1.png");
+    img_digits[2] = al_load_bitmap("2.png");
+    img_digits[3] = al_load_bitmap("3.png");
+    img_digits[4] = al_load_bitmap("4.png");
+    img_digits[5] = al_load_bitmap("5.png");
+    img_digits[6] = al_load_bitmap("6.png");
+    img_digits[7] = al_load_bitmap("7.png");
+    img_digits[8] = al_load_bitmap("8.png");
+    img_digits[9] = al_load_bitmap("9.png");
+    int i;
+    for (i = 0; i<10; i++)
+    {
+        if (!img_digits[i])
+            game_abort("failed to load image: digits.png");
+    }
+    // life bar
+    img_life_bar[0] = al_load_bitmap("life_bar_0.png");
+    img_life_bar[1] = al_load_bitmap("life_bar_1.png");
+    img_life_bar[2] = al_load_bitmap("life_bar_2.png");
+    img_life_bar[3] = al_load_bitmap("life_bar_3.png");
+    img_life_bar[4] = al_load_bitmap("life_bar_4.png");
+
+    for (i = 0; i<MAX_LIFE; i++)
+    {
+        if (!img_life_bar[i])
+            game_abort("failed to load image: life bar.png");
+    }
+
+    // game over image
+    img_game_over = load_bitmap_resized("game_over.png", SCREEN_W, SCREEN_H);
+    if (!img_game_over)
+        game_abort("failed to load image: game_over.png");
+
 	// Change to first scene.
 	game_change_scene(SCENE_MENU);
 }
@@ -388,6 +449,10 @@ void game_update(void) {
 			plane.y = plane.h/2;
 		else if (plane.y + plane.h/2 > SCREEN_H)
 			plane.y = SCREEN_H - plane.h/2;
+        // update life bar
+        life_bar.x = plane.x;
+        life_bar.y = plane.y + 24;
+
 		// [HACKATHON 2-7]
 		// TODO: Update bullet coordinates.
 		// 1) For each bullets, if it's not hidden, update x, y
@@ -430,6 +495,175 @@ void game_update(void) {
 		        bullets[i].y = plane.y - plane.h/2;
 		    }
 		}
+
+
+        int x, y, j, z, k;
+
+        // check if enemy bullets are out of the screen
+        for (i = 0; i<MAX_ENEMY; i++)
+        {
+            for (k = 0; k<MAX_ENEMY_BULLET; k++)
+            {
+                if (enemy_bullets[i][k].hidden) continue;
+
+                enemy_bullets[i][k].x += enemy_bullets[i][k].vx;
+                enemy_bullets[i][k].y += enemy_bullets[i][k].vy;
+                if (enemy_bullets[i][k].y + enemy_bullets[i][k].h > SCREEN_H)
+                    enemy_bullets[i][k].hidden = true;
+            }
+        }
+
+        // enemies
+        for (i = 0; i<MAX_ENEMY; i++)
+        {
+            // rebuild enemy
+            if (enemies[i].hidden == true)
+            {
+                if (now - last_enemy_timestamp[i] >= MAX_ENEMY_REBUILD_COOLDOWN){
+                    enemies[i].x = enemies[i].w / 2 + (float)rand() / RAND_MAX * (SCREEN_W - enemies[i].w);
+                    enemies[i].y = 80;
+                    enemies[i].hidden = false;
+                }
+
+                continue;
+            }
+            // enemies moving and shooting
+            if (now - last_enemy_timestamp[i] >= MAX_ENEMY_COOLDOWN){
+
+                // enemies moving
+                x = rand()%2;
+                y = rand()%2;
+
+                if (x) enemies[i].vx = -1;
+                else enemies[i].vx = 1;
+
+                if (y) enemies[i].vy = -1;
+                else enemies[i].vy = 1;
+
+                // enemies shooting
+
+                z = rand()%2;
+                if(z)
+                {
+                    for (k = 0; k<MAX_ENEMY_BULLET; k++)
+                    {
+                        if (enemy_bullets[i][k].hidden)
+                            break;
+                    }
+                    if (k<MAX_ENEMY_BULLET)
+                    {
+                        enemy_bullets[i][k].hidden = false;
+                        enemy_bullets[i][k].x = enemies[i].x;
+                        enemy_bullets[i][k].y = enemies[i].y + enemies[i].h/2;
+                    }
+                }
+
+                last_enemy_timestamp[i] = now;
+            }
+
+            enemies[i].y += enemies[i].vy * 4 * (enemies[i].vx ? 0.71f : 1);
+            enemies[i].x += enemies[i].vx * 4 * (enemies[i].vy ? 0.71f : 1);
+
+            if (enemies[i].x - enemies[i].w/2 < 0)
+                enemies[i].x = enemies[i].w/2;
+            else if (enemies[i].x + enemies[i].w/2 > SCREEN_W)
+                enemies[i].x = SCREEN_W - enemies[i].w/2;
+            if (enemies[i].y - enemies[i].h/2 < 0)
+                enemies[i].y = enemies[i].h/2;
+            else if (enemies[i].y + enemies[i].h/2 > SCREEN_H)
+                enemies[i].y = SCREEN_H - enemies[i].h/2;
+            // end of enemies moving and shooting
+        }
+        for (i = 0; i<MAX_ENEMY; i++){
+            // check if this enemy crash into player
+            int len_w, len_h;
+            len_w = (enemies[i].w + plane.w)/2 - 2;
+            len_h = (enemies[i].h + plane.h)/2 - 2;
+            if (plane.x - enemies[i].x <=    len_w &&
+                plane.x - enemies[i].x >= -1*len_w &&
+                plane.y - enemies[i].y <=    len_h &&
+                plane.y - enemies[i].y >= -1*len_h &&
+                enemies[i].hidden == false)
+            {
+                enemies[i].hidden = true;
+
+                counting += 5;
+                score_change = true;
+
+                life--;
+                if (life > 0) life_bar.img = img_life_bar[life];
+                else life_bar.img = img_life_bar[0];
+
+                crash_into_enemy = true;
+                last_enemy_timestamp[i] = now;
+            }
+
+            // for an enemy, check if player's bullets hit it and
+            // check if any of it's bullets hit player
+
+            // check if bullets hit enemies
+            if (crash_into_enemy) crash_into_enemy = false;
+            else {
+                for (j = 0; j<MAX_BULLET; j++)
+                {
+                    len_w = (bullets[j].w + enemies[i].w)/2 - 2;
+                    len_h = (bullets[j].h + enemies[i].h)/2 - 2;
+                    if (bullets[j].hidden == false && enemies[i].hidden == false)
+                    {
+                        if (bullets[j].x - enemies[i].x <=    len_w &&
+                            bullets[j].x - enemies[i].x >= -1*len_w &&
+                            bullets[j].y - enemies[i].y <=    len_h &&
+                            bullets[j].y - enemies[i].y >= -1*len_h)
+                        {
+                            bullets[j].hidden = true;
+                            enemies[i].hidden = true;
+                            counting += 10;
+                            score_change = true;
+                            last_enemy_timestamp[i] = now;
+                        }
+                    }
+                    // end of bullets check
+                }
+                // end of else
+            }
+            // end of check
+
+            // check if enemy bullets hit player
+            for (j = 0; j<MAX_ENEMY_BULLET; j++)
+            {
+                if (enemy_bullets[i][j].hidden) continue;
+                len_w = (enemy_bullets[i][j].w + plane.w)/2 - 2;
+                len_h = (enemy_bullets[i][j].h + plane.h)/2 - 10;
+                if (enemy_bullets[i][j].x - plane.x <=    len_w &&
+                    enemy_bullets[i][j].x - plane.x >= -1*len_w &&
+                    enemy_bullets[i][j].y - plane.y <=    len_h &&
+                    enemy_bullets[i][j].y - plane.y >= -1*len_h)
+                {
+                    life--;
+                    if (life > 0) life_bar.img = img_life_bar[life];
+                    else life_bar.img = img_life_bar[0];
+                    enemy_bullets[i][j].hidden = true;
+                }
+            }
+        }
+        // end of enemies
+
+        // update the score
+        if (score_change)
+        {
+            for (i = 0; i<MAX_DIGITS; i++)
+            {
+                score[i].img = img_digits[(counting/digit_table[i])%10];
+            }
+            score_change = false;
+        }
+        // end of update score
+
+        // check if game is over
+        if (life <= 0)
+        {
+            game_change_scene(SCENE_GAME_OVER);
+        }
 	}
 }
 
@@ -449,7 +683,7 @@ void game_draw(void) {
 		else
 			al_draw_bitmap(img_settings, SCREEN_W-48, 10, 0);
 	} else if (active_scene == SCENE_START) {
-		int i;
+		int i, j;
 		al_draw_bitmap(start_img_background, 0, 0, 0);
 		// [HACKATHON 2-9]
 		// TODO: Draw all bullets in your bullet array.
@@ -459,12 +693,31 @@ void game_draw(void) {
 		draw_movable_object(plane);
 		for (i = 0; i < MAX_ENEMY; i++)
 			draw_movable_object(enemies[i]);
+        // draw enemy bullets
+        for (i = 0; i < MAX_ENEMY; i++)
+        {
+            for (j = 0; j < MAX_ENEMY_BULLET; j++)
+                draw_movable_object(enemy_bullets[i][j]);
+        }
+
+        // draw score
+        for (i = 0; i<MAX_DIGITS; i++)
+        {
+            draw_movable_object(score[i]);
+        }
+
+        // draw life bar
+        draw_movable_object(life_bar);
 	}
 	// [HACKATHON 3-9]
 	// TODO: If active_scene is SCENE_SETTINGS.
 	// Draw anything you want, or simply clear the display.
 	else if (active_scene == SCENE_SETTINGS) {
 		al_clear_to_color(al_map_rgb(0, 0, 0));
+	}
+
+	else if (active_scene == SCENE_GAME_OVER){
+        al_draw_bitmap(img_game_over, 0, 0, 0);
 	}
 	al_flip_display();
 }
@@ -494,6 +747,15 @@ void game_destroy(void) {
 	// TODO: Destroy your bullet image.
 	// Uncomment and fill in the code below.
 	al_destroy_bitmap(img_bullet);
+
+	// my image
+	int i;
+	al_destroy_bitmap(img_enemy_bullet);
+	for (i = 0; i<10; i++)
+        al_destroy_bitmap(img_digits[i]);
+    for (i = 0; i<MAX_LIFE+1; i++)
+        al_destroy_bitmap(img_life_bar[i]);
+    al_destroy_bitmap(img_game_over);
 
 	al_destroy_timer(game_update_timer);
 	al_destroy_event_queue(game_event_queue);
@@ -544,6 +806,56 @@ void game_change_scene(int next_scene) {
 			bullets[i].vy = -3;
 			bullets[i].hidden = true;
 		}
+
+		// enemy bullet
+		int j;
+		for (i=0; i<MAX_ENEMY; i++)
+		{
+		    for (j=0; j<MAX_ENEMY_BULLET; j++)
+            {
+                enemy_bullets[i][j].w = al_get_bitmap_width(img_enemy_bullet);
+                enemy_bullets[i][j].h = al_get_bitmap_height(img_enemy_bullet);
+                enemy_bullets[i][j].img = img_enemy_bullet;
+                enemy_bullets[i][j].vx = 0;
+                enemy_bullets[i][j].vy = 3;
+                enemy_bullets[i][j].hidden = true;
+            }
+		}
+
+        // score
+		counting = 0;
+		score_change = true;
+		crash_into_enemy = false;
+		digit_table[0] = 1;
+		for (i = 1; i<MAX_DIGITS; i++)
+        {
+            digit_table[i] = 10*digit_table[i-1];
+        }
+
+		score[MAX_DIGITS-1].img = img_digits[0];
+		score[MAX_DIGITS-1].w = al_get_bitmap_width(img_digits[0]);
+		score[MAX_DIGITS-1].h = al_get_bitmap_height(img_digits[0]);
+		score[MAX_DIGITS-1].x = 32;
+		score[MAX_DIGITS-1].y = 32;
+		score[MAX_DIGITS-1].hidden = false;
+		for (i = MAX_DIGITS-2; i>-1; i--)
+        {
+            score[i].img = img_digits[0];
+            score[i].w = al_get_bitmap_width(img_digits[0]);
+            score[i].h = al_get_bitmap_height(img_digits[0]);
+            score[i].x = 32 + (MAX_DIGITS-1-i)*(score[i].w + score[i+1].w)/2;
+            score[i].y = 32;
+            score[i].hidden = false;
+        }
+
+        // life
+        life = MAX_LIFE;
+        life_bar.img = img_life_bar[MAX_LIFE];
+        life_bar.w = al_get_bitmap_width(img_life_bar[MAX_LIFE]);
+        life_bar.h = al_get_bitmap_height(img_life_bar[MAX_LIFE]);
+        life_bar.x = plane.x;
+        life_bar.y = plane.y + 24;
+
 		if (!al_play_sample(start_bgm, 1, 0.0, 1.0, ALLEGRO_PLAYMODE_LOOP, &start_bgm_id))
 			game_abort("failed to play audio (bgm)");
 	}
@@ -602,7 +914,6 @@ ALLEGRO_BITMAP *load_bitmap_resized(const char *filename, int w, int h) {
 bool pnt_in_rect(int px, int py, int x, int y, int w, int h) {
 	return px >= x && px <= x+w && py >= y && py <= y+h ? 1 : 0;
 }
-
 
 // +=================================================================+
 // | Code below is for debugging purpose, it's fine to remove it.    |
